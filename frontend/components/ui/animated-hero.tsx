@@ -15,8 +15,14 @@ function Hero() {
 
   const router = useRouter();
   const [agentOnline, setAgentOnline] = useState(false);
+
+  // Derive WS URL from the current window — works regardless of port
+  const wsUrl = typeof window !== "undefined"
+    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`
+    : "ws://localhost:3000/ws";
+
   const { status: relayStatus } = useRelay({
-    relayUrl: process.env.NEXT_PUBLIC_WEBSOCKET_URL || "ws://localhost:3001",
+    relayUrl: wsUrl,
     userId: "demo-user-123",
     onAgentStatus: (online) => setAgentOnline(online)
   });
@@ -85,7 +91,7 @@ function Hero() {
               disabled={relayStatus !== 'connected'}
             >
               {relayStatus !== 'connected' ? (
-                <><Loader2 className="w-4 h-4 animate-spin" /> Waiting for Cloud Relay</>
+                <><Loader2 className="w-4 h-4 animate-spin" /> Connecting to Local Agent...</>
               ) : agentOnline ? (
                  <>Enter Command Center <Sparkles className="w-4 h-4" /></>
               ) : (

@@ -23,36 +23,19 @@ export function useVoice({
   const [error, setError] = useState<string | null>(null);
   const [decibels, setDecibels] = useState(0);
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const animFrameRef = useRef<number | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
 
-  // Volume visualisation via Web Audio API
-  const startVisualization = useCallback((stream: MediaStream) => {
-    const ctx = new AudioContext();
-    const source = ctx.createMediaStreamSource(stream);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    source.connect(analyser);
-    analyserRef.current = analyser;
-
-    const data = new Uint8Array(analyser.frequencyBinCount);
-
-    const tick = () => {
-      analyser.getByteFrequencyData(data);
-      const avg = data.reduce((a, b) => a + b, 0) / data.length;
-      setDecibels(Math.round(avg));
-      animFrameRef.current = requestAnimationFrame(tick);
-    };
-    animFrameRef.current = requestAnimationFrame(tick);
-  }, []);
-
-  const stopVisualization = useCallback(() => {
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    setDecibels(0);
-  }, []);
+  // Helper to convert Float32Array to Int16Array (16-bit PCM)
+  const floatTo16BitPCM = (input: Float32Array) => {
+    const output = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      output[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return output.buffer;
+  };
 
   const startRecording = useCallback(async () => {
     try {
@@ -61,74 +44,80 @@ export function useVoice({
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: 24000,   // Gemini Live API preferred sample rate
-          channelCount: 1,     // Mono
+          sampleRate: 24000,
+          channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
         },
       });
 
       streamRef.current = stream;
-      chunksRef.current = [];
+      
+      const audioContext = new AudioContext({ sampleRate: 24000 });
+      audioContextRef.current = audioContext;
 
-      const recorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm;codecs=opus",
-      });
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
 
-      mediaRecorderRef.current = recorder;
+      // We use ScriptProcessorNode for simple PCM extraction
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      processorRef.current = processor;
 
-      recorder.ondataavailable = async (e) => {
-        if (e.data.size > 0) {
-          chunksRef.current.push(e.data);
+      const data = new Uint8Array(analyser.frequencyBinCount);
 
-          if (onAudioChunk) {
-            // Convert blob to base64 and stream to relay
-            const buffer = await e.data.arrayBuffer();
-            const base64 = btoa(
-              String.fromCharCode(...new Uint8Array(buffer))
-            );
-            onAudioChunk(base64);
-          }
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        
+        // Update visualization
+        analyser.getByteFrequencyData(data);
+        const avg = data.reduce((a, b) => a + b, 0) / data.length;
+        setDecibels(Math.round(avg));
+
+        // Stream PCM chunk
+        if (onAudioChunk) {
+          const pcmBuffer = floatTo16BitPCM(inputData);
+          const base64 = btoa(
+            String.fromCharCode(...new Uint8Array(pcmBuffer))
+          );
+          onAudioChunk(base64);
         }
       };
 
-      recorder.onstop = () => {
-        const fullBlob = new Blob(chunksRef.current, { type: "audio/webm" });
-        onRecordingComplete?.(fullBlob);
-        stopVisualization();
-      };
-
-      // Stream chunks every `chunkIntervalMs` for low-latency relay
-      recorder.start(chunkIntervalMs);
       setStatus("recording");
-      startVisualization(stream);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Microphone access denied";
       setError(msg);
       setStatus("error");
     }
-  }, [onAudioChunk, onRecordingComplete, chunkIntervalMs, startVisualization, stopVisualization]);
+  }, [onAudioChunk]);
 
   const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.stop();
-      setStatus("processing");
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
     }
+    setStatus("idle");
+    setDecibels(0);
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopVisualization();
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop();
-      }
-      streamRef.current?.getTracks().forEach((t) => t.stop());
+      stopRecording();
     };
-  }, [stopVisualization]);
+  }, [stopRecording]);
 
   return {
     status,

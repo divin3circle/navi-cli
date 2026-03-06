@@ -1,53 +1,63 @@
 import { EventEmitter } from "events";
-import { GoogleGenAI, LiveConnectConfig } from "@google/generative-ai";
-import { Agent } from "./agent.js";
+// @ts-ignore
+import WebSocket from "ws";
+import { Agent } from "./Agent.js";
 import { Logger } from "../utils/logger.js";
 
-// We use the new real-time Live API provided by the @google/generative-ai SDK.
-// The Live API works with WebSockets locally and can process audio-in and audio-out.
-
+/**
+ * Direct WebSocket implementation for the Gemini Multimodal Live API.
+ * Uses snake_case as required by the v1beta wire protocol for raw WS.
+ */
 export class LiveAPIHandler extends EventEmitter {
-  private ai: GoogleGenAI;
-  private session: any | null = null;
+  private ws: WebSocket | null = null;
   private systemAgent: Agent;
+  private apiKey: string;
 
   constructor(agent: Agent, apiKey: string) {
     super();
     this.systemAgent = agent;
-    this.ai = new GoogleGenAI({ apiKey });
+    this.apiKey = apiKey;
   }
 
   async connect() {
-    Logger.info("Connecting to Gemini Live API...");
-    try {
-      // Create a websocket based streaming session using the gemini-2.0-flash-exp model
-      // Note: The Live API requires the 'exp' model generally.
+    if (this.ws) return;
+
+    // v1beta Multimodal Live Endpoint
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.MultimodalLive?key=${this.apiKey}`;
+    
+    Logger.info("Connecting to Gemini Multimodal Live API...");
+    
+    this.ws = new WebSocket(url);
+
+    this.ws.on("open", () => {
+      Logger.info("Gemini WebSocket opened. Sending setup handshake...");
       
-      const config: LiveConnectConfig = {
-        model: "models/gemini-2.0-flash-exp",
-        generationConfig: {
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: "Aoede", // Choose a professional voice
+      const setupMsg = {
+        setup: {
+          model: "models/gemini-2.0-flash-exp",
+          generation_config: {
+            response_modalities: ["audio"],
+            speech_config: {
+              voice_config: {
+                prebuilt_voice_config: {
+                  voice_name: "Aoede", 
+                }
               }
             }
           },
-          systemInstruction: {
+          system_instruction: {
             parts: [{
               text: `You are GenSSH Live. A voice-controlled, on-call DevOps SRE Agent. 
 You are listening directly to the user's voice and replying with voice.
-When the user asks you to perform an action, ALWAYS use the 'executeSystemCommand' function tool.
+When the user asks you to perform an action, ALWAYS use the 'execute_system_command' function tool.
 Do NOT just say what you would do. DO IT. 
 Respond concisely. Your response is being spoken aloud to the user.`
             }]
-          }
-        },
-        tools: [
-          {
-            functionDeclarations: [
+          },
+          tools: [{
+            function_declarations: [
               {
-                name: "executeSystemCommand",
+                name: "execute_system_command",
                 description: "Executes a shell command on the user's server.",
                 parameters: {
                   type: "OBJECT",
@@ -65,127 +75,147 @@ Respond concisely. Your response is being spoken aloud to the user.`
                 }
               }
             ]
-          }
-        ]
+          }]
+        }
       };
 
-      // @ts-ignore - Note: Assuming SDK signature structure for the emerging Live API client
-      this.session = await this.ai.clients.createLiveSession(config);
+      this.ws?.send(JSON.stringify(setupMsg));
+    });
 
-      this.session.on("message", async (msg: any) => {
-         // Handle inbound audio from Gemini mapped to UI
-         if (msg.serverContent?.modelTurn?.parts) {
-            for (const part of msg.serverContent.modelTurn.parts) {
-               if (part.inlineData && part.inlineData.mimeType.startsWith("audio/pcm")) {
-                  // Forward audio downstream to the relay
-                  this.emit("audio_response", part.inlineData.data);
-               }
+    this.ws.on("message", async (data: any) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        // 1. Handshake Result
+        if (msg.setup_complete || msg.setupComplete) {
+          Logger.info("Gemini Live Session AUTHENTICATED & READY.");
+          this.emit("ready");
+          return;
+        }
+
+        // 2. Error Handling
+        const serverError = msg.server_content?.error || msg.serverContent?.error;
+        if (serverError) {
+          Logger.error(`Gemini Server Error: ${JSON.stringify(serverError)}`);
+          return;
+        }
+
+        // 3. Audio/Text Content
+        const modelTurn = msg.server_content?.model_turn || msg.serverContent?.modelTurn;
+        if (modelTurn?.parts) {
+          for (const part of modelTurn.parts) {
+            const inlineData = part.inline_data || part.inlineData;
+            if (inlineData?.mime_type?.startsWith("audio/pcm") || inlineData?.mimeType?.startsWith("audio/pcm")) {
+              this.emit("audio_response", inlineData.data);
             }
-         }
+            if (part.text) {
+              this.emit("text_response", part.text);
+            }
+          }
+        }
 
-         // Handle Tool / Function Calls
-         if (msg.serverContent?.modelTurn?.functionCalls) {
-            for (const call of msg.serverContent.modelTurn.functionCalls) {
-              if (call.name === "executeSystemCommand") {
-                const args = call.args as { command: string, reason: string };
-                Logger.info(`Executing command for Gemini: ${args.command}`);
-                try {
-                  // We simulate the action structure required by the real Agent executor
-                  const result = await this.systemAgent.executeAction({
-                    type: "command",
-                    description: args.reason,
-                    command: args.command
-                  });
+        // 4. Tool Calls
+        if (modelTurn?.function_calls || modelTurn?.functionCalls) {
+          const calls = modelTurn.function_calls || modelTurn.functionCalls;
+          for (const call of calls) {
+            if (call.name === "execute_system_command") {
+              const args = call.args as { command: string; reason: string };
+              Logger.info(`⚙ Gemini Executing: ${args.command}`);
+              
+              try {
+                const result = await this.systemAgent.executeAction({
+                  type: "command",
+                  description: args.reason,
+                  command: args.command
+                });
 
-                  this.emit("execution_result", {
-                    command: args.command,
-                    output: result,
-                    exitCode: 0 
-                  });
+                this.emit("execution_result", {
+                  command: args.command,
+                  output: result,
+                  exitCode: 0 
+                });
 
-                  // Send the outcome back to the live session
-                  await this.session.send({
-                    clientContent: {
-                      turnComplete: true,
-                      turns: [{
-                        parts: [{
-                          functionResponse: {
-                            name: "executeSystemCommand",
-                            response: { result: "Success", output: result }
-                          }
-                        }]
-                      }]
-                    }
-                  });
-                } catch (e: any) {
-                  Logger.error(`Command failed: ${e.message}`);
-                  this.emit("execution_result", {
-                    command: args.command,
-                    output: e.message,
-                    exitCode: 1
-                  });
-                  // Inform Gemini of failure
-                  await this.session.send({
-                    clientContent: {
-                      turnComplete: true,
-                      turns: [{
-                        parts: [{
-                          functionResponse: {
-                            name: "executeSystemCommand",
-                            response: { result: "Failed", error: e.message }
-                          }
-                        }]
-                      }]
-                    }
-                  });
-                }
+                // Send tool result back (snake_case)
+                this.ws?.send(JSON.stringify({
+                  tool_response: {
+                    function_responses: [{
+                      name: "execute_system_command",
+                      id: call.id,
+                      response: { result: "Success", output: result }
+                    }]
+                  }
+                }));
+              } catch (e: any) {
+                Logger.error(`Command execution failed: ${e.message}`);
+                this.emit("execution_result", {
+                  command: args.command,
+                  output: e.message,
+                  exitCode: 1
+                });
+                this.ws?.send(JSON.stringify({
+                  tool_response: {
+                    function_responses: [{
+                      name: "execute_system_command",
+                      id: call.id,
+                      response: { result: "Failed", error: e.message }
+                    }]
+                  }
+                }));
               }
             }
-         }
-      });
+          }
+        }
 
-      this.session.on("close", () => {
-        Logger.info("Gemini Live API connection closed.");
-      });
+        // 5. Interruption (Barge-in)
+        const interrupted = msg.server_content?.interrupted || msg.serverContent?.interrupted;
+        if (interrupted) {
+          Logger.info("Gemini interrupted by user speech.");
+          this.emit("interrupted");
+        }
 
-      await this.session.connect();
-      Logger.info("Gemini Live API Ready.");
+      } catch (err) {
+        Logger.error(`Failed to process Gemini message: ${err}`);
+      }
+    });
 
-    } catch (e) {
-      Logger.error(`Live API Error: ${e}`);
-    }
+    this.ws.on("error", (err: any) => {
+      Logger.error(`Gemini WebSocket Connection Error: ${err.message}`);
+      this.ws = null;
+    });
+
+    this.ws.on("close", (code: number, reason: string) => {
+      Logger.info(`Gemini Session Closed (${code}): ${reason}`);
+      this.ws = null;
+      this.emit("close");
+    });
   }
 
-  // Takes raw base64 buffer chunks from the frontend user microphone
   sendAudio(base64Chunk: string) {
-    if (!this.session) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
     
-    // We package the base64 audio into the structure expected by Gemini Live
+    // v1beta realtime_input mapping
     const msg = {
-      clientContent: {
-        turns: [{
-          parts: [{
-            inlineData: {
-              mimeType: "audio/webm;codecs=opus", 
-              data: base64Chunk
-            }
-          }]
-        }],
-        turnComplete: true
+      realtime_input: {
+        media_chunks: [{
+          mime_type: "audio/pcm;rate=24000",
+          data: base64Chunk
+        }]
       }
     };
 
     try {
-      this.session.send(msg);
+      this.ws.send(JSON.stringify(msg));
     } catch (e) {
-      Logger.error(`Failed to send audio chunk: ${e}`);
+      Logger.error(`Failed to send audio to Gemini: ${e}`);
     }
   }
 
   disconnect() {
-    if (this.session) {
-      this.session.close();
-      this.session = null;
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
     }
   }
 }

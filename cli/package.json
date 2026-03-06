@@ -1,15 +1,20 @@
 {
-  "name": "genssh-monorepo",
+  "name": "genssh-cli",
   "private": true,
   "scripts": {
-    "build": "turbo run build",
-    "dev": "turbo run dev",
-    "lint": "turbo run lint",
+    "build": "bun build ./src/cli/index.ts --compile --outfile=genssh",
+    "dev": "bun run ./src/cli/index.ts",
+    "init": "bun run ./src/cli/index.ts init",
+    "live": "bun run ./src/cli/index.ts live",
+    "chat": "bun run ./src/cli/index.ts chat",
+    "status": "bun run ./src/cli/index.ts status",
+    "lint": "tsc --noEmit",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
   "dependencies": {
     "@clack/prompts": "^0.7.0",
     "@google-cloud/storage": "^7.19.0",
+    "@google/genai": "^1.44.0",
     "@google/generative-ai": "^0.21.0",
     "@opentui/core": "^0.1.75",
     "@opentui/react": "^0.1.75",

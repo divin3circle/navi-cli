@@ -9,6 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { AIVoiceInput } from "@/components/ui/ai-voice-input";
 import { useVoice } from "@/hooks/useVoice";
 import { useRelay } from "@/hooks/useRelay";
+import { useAudioPlayback } from "@/hooks/useAudioPlayback";
 
 export default function VoiceCommandCenter() {
   const [logs, setLogs] = useState<{ id: string; type: "user" | "agent" | "system"; text: string }[]>([]);
@@ -17,8 +18,11 @@ export default function VoiceCommandCenter() {
   
   // Add log helper
   const addLog = (type: "user" | "agent" | "system", text: string) => {
+    if (!text) return;
     setLogs((prev) => [...prev, { id: Math.random().toString(36).substr(2, 9), type, text }]);
   };
+
+  const { playChunk, stopAll, initAudio } = useAudioPlayback();
 
   const [wsUrl, setWsUrl] = useState("ws://localhost:3000/ws");
 
@@ -36,7 +40,7 @@ export default function VoiceCommandCenter() {
     onAgentStatus: (online) => {
       setAgentOnline(online);
       if (online) {
-        addLog("system", "Secure NAT-traversed tunnel to local GenSSH agent established.");
+        addLog("system", "Direct connection to GenSSH agent established.");
       } else {
         addLog("system", "GenSSH agent disconnected.");
       }
@@ -44,8 +48,12 @@ export default function VoiceCommandCenter() {
     onMessage: (msg) => {
       if (msg.type === "text_response") {
         addLog("agent", msg.payload.text);
+      } else if (msg.type === "audio_response") {
+        playChunk(msg.payload.audioBase64);
+      } else if (msg.type === "interrupted") {
+        stopAll();
       } else if (msg.type === "execution_result") {
-        addLog("system", `Executed: ${msg.payload.command}\nExit Code: ${msg.payload.exitCode}\nOutput: ${msg.payload.output}`);
+        addLog("system", `Executed: ${msg.payload.command}\n${msg.payload.output}`);
       } else if (msg.type === "error") {
         addLog("system", `ERROR: ${msg.message}`);
       }
@@ -130,12 +138,14 @@ export default function VoiceCommandCenter() {
             </CardHeader>
             <CardContent className="flex flex-col items-center justify-center py-12 gap-8">
                
-              <AIVoiceInput
-                onStart={startRecording}
-                onStop={stopRecording}
-                disabled={relayStatus !== "connected" || !agentOnline}
-                visualizerBars={24}
-              />
+              <div onClick={() => initAudio()} className="cursor-pointer">
+                <AIVoiceInput
+                  onStart={startRecording}
+                  onStop={stopRecording}
+                  disabled={relayStatus !== "connected" || !agentOnline}
+                  visualizerBars={24}
+                />
+              </div>
 
               {!agentOnline && (
                 <div className="text-center space-y-2 p-4 bg-muted/30 rounded-lg border border-border">

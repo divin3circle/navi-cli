@@ -14,6 +14,7 @@ type RelayMessage =
   | { type: "audio_response"; payload: { audioBase64: string } }
   | { type: "execution_result"; payload: { command: string; output: string; exitCode: number } }
   | { type: "error"; message: string }
+  | { type: "interrupted" }
   | { type: "pong"; ts: number };
 
 interface UseRelayOptions {

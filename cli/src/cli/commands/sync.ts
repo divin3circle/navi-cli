@@ -1,5 +1,5 @@
 import { Storage } from "@google-cloud/storage";
-import { configManager } from "../../config/ConfigManager.js";
+import { ConfigManager } from "../../config/ConfigManager.js";
 import { AbilityManager } from "../../core/AbilityManager.js";
 import { intro, outro, spinner, note, text } from "@clack/prompts";
 import chalk from "chalk";
@@ -31,6 +31,8 @@ export async function syncCommand(action: string) {
     process.exit(1);
   }
 
+  const configManager = new ConfigManager();
+  
   // Find user's intended bucket or prompt for one
   let bucketName = configManager.get("gcpSyncBucket" as any) as string;
 
@@ -42,6 +44,7 @@ export async function syncCommand(action: string) {
       placeholder: "e.g., genssh-backups-bucket",
       validate(value) {
         if (!value) return "Bucket name is required.";
+        return;
       },
     });
 
